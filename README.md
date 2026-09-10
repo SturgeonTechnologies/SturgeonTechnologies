@@ -1,0 +1,148 @@
+# Sturgeon Technologies
+
+Managed infrastructure, ISP, and software for small and mid‑size businesses —
+run the way a platform team runs production: **everything as code, Git is the
+source of truth, machines do the applying.**
+
+This repo is the org's internal index: what we work on, where it lives, and how
+the pieces fit together.
+
+---
+
+## What we work on
+
+| Area | What it is |
+| ---- | ---------- |
+| **ISP / connectivity** | Business internet delivered over a Fatbeam fiber uplink, with a UniFi‑managed edge (gateway, VLANs, Wi‑Fi). Configuration, drift detection, backups, and billing are automated out of the cluster — see [Managing the ISP in GitOps](#managing-the-isp-in-gitops). |
+| **Managed infrastructure & consulting** | Standing up and operating GitOps platforms, Kubernetes, secrets management, backup/DR, and monitoring for SMB clients. |
+| **Homelab / production cluster** | A 6‑node bare‑metal Kubernetes cluster (kubeadm) that runs our own workloads and is the reference implementation for client work. |
+| **Application development** | Serverless full‑stack apps on AWS (SAM + React), plus multi‑agent tooling. |
+
+---
+
+## Repositories
+
+| Repo | Purpose |
+| ---- | ------- |
+| [`kubernetes_flux`](https://github.com/SturgeonTechnologies/kubernetes_flux) | GitOps manifests for the production cluster. Push a commit, Flux applies it — nobody runs `kubectl` by hand. Includes the ISP/network, billing, backup, and monitoring workloads. |
+| [`kubernetes_deployment`](https://github.com/SturgeonTechnologies/kubernetes_deployment) | One‑time cluster bootstrap: kubeadm, Calico, HAProxy + keepalived, Flux install. Hands off to `kubernetes_flux` for day‑2. |
+| [`OPS_ansible`](https://github.com/SturgeonTechnologies/OPS_ansible) | Operational Ansible — cluster health sweeps, workload/service remediation, failed‑job cleanup, app deploys, and the vault‑brief job. Run from AWX. |
+| [`AWX_CaC`](https://github.com/SturgeonTechnologies/AWX_CaC) | AWX configuration as code for `awx.sturgeon.tech`. Every org, project, inventory, credential, job template, workflow, and schedule is declared in YAML and reconciled against the AWX API. |
+| [`BackFriend_FullStack`](https://github.com/SturgeonTechnologies/BackFriend_FullStack) | Serverless file‑sharing app (AWS SAM backend + Vite SPA), deployed per "space" from Ansible variables. |
+| [`openclaude`](https://github.com/SturgeonTechnologies/openclaude) | Agent runtime — "runs anywhere, uses anything." Basis for the multi‑agent work on the cluster. |
+
+---
+
+## The platform
+
+```
+GitHub (main)  ──git poll 1m──▶  Flux  ──▶  infrastructure/  ──▶  application namespaces
+                                   │         cert-manager               media · monitoring · home
+                                   │         Traefik ingress             billing · network · awx …
+                                   │         External Secrets            backup/ CronJobs
+                                   ▼
+                             Alerts → Discord / Slack
+```
+
+- **Reconciliation:** Flux polls `kubernetes_flux@main` every minute. Durable
+  change goes through Git and CI (yamllint + prettier); hand‑applied change
+  drifts and is reverted.
+- **Secrets:** never committed. External Secrets Operator pulls them from **AWS
+  Secrets Manager** at runtime; workloads authenticate to AWS via IRSA.
+- **Storage:** RWX **NFS** backed by an Unraid box; bulk backups go to
+  **`s3://schuit-backups/`**.
+- **Automation orchestration:** **AWX** runs the Ansible playbooks. Direction of
+  travel for operations is `monitor → trigger → Ansible playbook → log the
+  effort → alert on failure`.
+- **Observability:** Prometheus + Grafana, with Discord/Slack notifications.
+
+---
+
+## Managing the ISP in GitOps
+
+The edge network is UniFi‑managed (a UDM Pro gateway fronting the LAN, VLANs, and
+Wi‑Fi) on a Fatbeam fiber uplink. The UniFi controller is still the place changes
+are *made*, but everything around it — the record of intended state, drift
+detection, backups, monitoring, and the vendor bill — is **code in
+`kubernetes_flux`** and runs as scheduled jobs in the cluster.
+
+### 1. Declarative record — `clusters/production/network/`
+
+- `unifi-config/` holds a JSON dump of the controller's state: LAN + VLAN
+  definitions (`networkconf`), Wi‑Fi SSIDs (`wlanconf`), and site settings
+  (`settings`). The human‑readable VLAN map is documented alongside it.
+- Before anything is committed, a fixed set of sensitive fields
+  (`x_passphrase`, `pre_shared_key`, `shared_secret`, `password`, `api_key`,
+  `wpa_psk`, `snmp_community`, …) is scrubbed to `***REDACTED***`. The full
+  unredacted state lives only on the UDM Pro and in the encrypted S3 backup.
+- A `network` namespace is carved out here for any controller‑facing tooling
+  (drift detection, provisioning, exporters).
+
+### 2. Drift detection — `network/unifi-config-export` CronJob
+
+Daily job that:
+
+1. authenticates to the controller with a scoped local admin account (creds via
+   External Secrets → AWS Secrets Manager),
+2. pulls every relevant endpoint — `networkconf`, `wlanconf`, `firewallrule`,
+   `firewallgroup`, `routing`, `portconf`, `user-group`, `settings` — into one
+   snapshot,
+3. redacts secrets,
+4. diffs it against the last snapshot in `s3://schuit-backups/unifi-config-snapshots/`,
+5. on change: uploads a timestamped snapshot + updates `latest.json`, and posts
+   a **per‑section diff summary to Discord** (`networkconf: 10 → 11 entries`, …).
+   No change means no upload and no noise.
+
+> Status: **suspended since 2026‑06‑02** pending an S3 cost review. Set
+> `suspend: false` to resume.
+
+### 3. Backups — `backup/unifi-backup` CronJob
+
+Weekly full controller backup (Sunday 04:00) to
+`s3://schuit-backups/unifi-backups/`, scheduled before the config export so the
+two never collide on the controller's auth lockout.
+
+### 4. Monitoring — `monitoring/`
+
+`unifi-poller` scrapes the controller's API read‑only into Prometheus; Grafana
+dashboards (`unifi-dashboards`) render client counts, throughput, and AP health.
+UniFi Protect is exposed through an MCP server for camera/event queries.
+
+### 5. Vendor billing — `billing/fatbeam-bill-watcher` CronJob
+
+Runs at noon PT on the 1st–5th of each month. Authenticates as
+`billing@sturgeon.tech` via a Google Cloud service account with domain‑wide
+delegation (no OAuth refresh‑token dance), finds the month's Fatbeam AR invoice
+in the mailbox, labels it so it only fires once, and pings Discord — or pings a
+**"bill missing"** alert if day 5 arrives with no invoice. v2 will create the
+QuickBooks Bill and schedule the payment.
+
+### Change workflow
+
+```
+edit manifest in kubernetes_flux ──▶ PR + CI (yamllint / prettier)
+        │
+        └─▶ merge to main ──▶ Flux reconciles (≤1m) ──▶ CronJobs / secrets updated
+```
+
+Controller‑side changes (a new VLAN, a firewall rule) are made in the UniFi UI
+today, then captured on the next export. The roadmap is to close that loop:
+automate the export as a first‑class job again, add drift *correction* (not just
+detection), and drive VLAN/firewall provisioning from committed config.
+
+---
+
+## Conventions
+
+- **Git is the source of truth.** UIs (AWX, UniFi, the cluster) are read‑models
+  of what's in a repo.
+- **Document how services fit together** in the repo that owns them — not just
+  the bare manifest.
+- **Secrets never land in Git.** If a workload needs one, it goes in AWS Secrets
+  Manager and is pulled by External Secrets.
+- **Restarts are pod deletes, not rollouts** — Flux owns the spec.
+
+---
+
+*Internal overview — the org's public GitHub profile is rendered separately from
+`SturgeonTechnologies/.github`.*
