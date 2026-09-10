@@ -28,7 +28,9 @@ the pieces fit together.
 | [`kubernetes_deployment`](https://github.com/SturgeonTechnologies/kubernetes_deployment) | One‑time cluster bootstrap: kubeadm, Calico, HAProxy + keepalived, Flux install. Hands off to `kubernetes_flux` for day‑2. |
 | [`OPS_ansible`](https://github.com/SturgeonTechnologies/OPS_ansible) | Operational Ansible — cluster health sweeps, workload/service remediation, failed‑job cleanup, app deploys, and the vault‑brief job. Run from AWX. |
 | [`AWX_CaC`](https://github.com/SturgeonTechnologies/AWX_CaC) | AWX configuration as code for `awx.sturgeon.tech`. Every org, project, inventory, credential, job template, workflow, and schedule is declared in YAML and reconciled against the AWX API. |
-| [`BackFriend_FullStack`](https://github.com/SturgeonTechnologies/BackFriend_FullStack) | Serverless file‑sharing app (AWS SAM backend + Vite SPA), deployed per "space" from Ansible variables. |
+| [`schuit-sharing`](https://github.com/SturgeonTechnologies/schuit-sharing) / [`BackFriend_FullStack`](https://github.com/SturgeonTechnologies/BackFriend_FullStack) | Invite‑only file‑sharing app, live at **schuit.io**. AWS SAM + React/Vite SPA; multi‑"space" deployable with public deploy tooling. Deployed per space from the `OPS_ansible` `deploy_backfriend` playbook. |
+| [`sturgeon_dot_tech`](https://github.com/SturgeonTechnologies/sturgeon_dot_tech) | Serverless CMS + store for **sturgeon.tech**, on AWS SAM. Runs the full stack offline with no AWS deploy; Stripe/PayPal stubbed. |
+| [`AWS_IOT_MGMT`](https://github.com/SturgeonTechnologies/AWS_IOT_MGMT) | Serverless management app for **AWS IoT Core** — device ACLs, cloud sketch compile (`arduino-cli` in Lambda), certificate provisioning, and Device‑Shadow OTA. Python SAM backend + React SPA. |
 | [`openclaude`](https://github.com/SturgeonTechnologies/openclaude) | Agent runtime — "runs anywhere, uses anything." Basis for the multi‑agent work on the cluster. |
 
 ---
@@ -129,6 +131,64 @@ Controller‑side changes (a new VLAN, a firewall rule) are made in the UniFi UI
 today, then captured on the next export. The roadmap is to close that loop:
 automate the export as a first‑class job again, add drift *correction* (not just
 detection), and drive VLAN/firewall provisioning from committed config.
+
+---
+
+## Serverless applications
+
+Three apps share one architecture: **AWS SAM** — a React (Vite) SPA on a private
+S3 bucket behind CloudFront (Origin Access Control), an API Gateway HTTP API in
+front of Lambda, a single‑table DynamoDB backend, Cognito for auth (email +
+optional Google/Facebook, role groups, first confirmed user → admin), and SES
+for verification / reset / transactional mail. Custom domain, cert, and DNS are
+an opt‑in ACM + Route 53 layer. Every deployment‑specific value is a blank‑default
+template parameter, so nothing identifying lives in the repos; real values sit in
+a git‑ignored `samconfig.local.toml`.
+
+### schuit‑sharing — file sharing (`schuit-sharing` / `BackFriend_FullStack`)
+
+Invite‑only web app for browsing and downloading shared files out of S3
+(per‑mount access control, admin‑managed invites). **Live in production at
+[schuit.io](https://schuit.io).** Migrated off the Serverless Framework to SAM
+(cutover Aug 2026). Deployable by a stranger in ~1 hour: `quickstart.mjs` /
+`teardown.mjs` handle frontend hosting + SES setup, region‑mismatch guards, and a
+type‑the‑phrase confirmation before any prod‑shaped teardown. Multiple isolated
+"spaces" (`schuit-sharing`, `beeks-sharing`, `samtest`) run from the same code,
+each stood up from an `OPS_ansible` per‑space vars file. Runtime `GET /config`
+drives which login options the SPA shows, so a stack's real Cognito state — not
+build‑time assumptions — decides the UI. In‑browser image/video preview with
+1‑hour presigned URLs. An Expo / React Native client targets the same backend
+with federated spaces.
+
+### sturgeon.tech — marketing site + store (`sturgeon_dot_tech`)
+
+Serverless CMS and storefront for the company site: public homepage, admin‑only
+article CRUD with a WYSIWYG editor, hero images and attachments, `homepage` /
+`published` flags. Whole stack runs **offline** — `make local-up` gives you
+DynamoDB Local, `make api` / `make web` the rest, with a dev role switcher
+(guest → customer → store/site/super‑admin) so every screen is reachable without
+Cognito. Baseline scaffold, not yet deployed; Stripe and PayPal are stubbed in
+the UI.
+
+### AWS IoT management (`AWS_IOT_MGMT`)
+
+Serverless console for **AWS IoT Core**: manage Things, per‑device email ACLs
+(authoritative Set attribute + reverse index, dual‑written in one transaction),
+and users. Deliberately split into **three stacks** — `cert` (us‑east‑1 ACM),
+`stateful` (Cognito / DynamoDB / S3 / SES, all `DeletionPolicy: Retain`), and a
+disposable `app` stack that finds the stateful resources through SSM Parameter
+Store — so tearing down or rolling back the app can never destroy accounts,
+device ACLs, or firmware. The device never compiles anything: an Arduino sketch
+lives on the device's DynamoDB row and is built by a container‑image Lambda
+running `arduino-cli` + the ESP32 toolchain; the binary lands in a private S3
+bucket keyed by an immutable `thingId`. `POST /provision` mints the device's
+X.509 certificate (verified end‑to‑end against AWS IoT over mutual TLS); OTA is
+driven by `desired` / `reported` `firmwareEpoch` on the Device Shadow. Auth is
+Cognito Managed Login v2 (OAuth2 + PKCE) with native/Google account linking via
+`PreSignUp` / `PostConfirmation` / `PostAuthentication` triggers; unknown callers
+get **404, not 403**, so device names can't be probed. GitHub Actions deploys the
+app stack + frontend via OIDC (no stored AWS keys); the Retain‑protected stateful
+stack is deployed by hand.
 
 ---
 
