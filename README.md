@@ -16,7 +16,7 @@ together.
 | **ISP / connectivity** | Business internet over a Fatbeam fiber uplink with a UniFi‑managed edge. Configuration, drift detection, backups, and the vendor bill are automated out of the cluster — see [Managing the ISP in GitOps](#managing-the-isp-in-gitops). |
 | **Managed infrastructure & consulting** | Standing up and operating GitOps platforms, Kubernetes, secrets management, backup/DR, and monitoring for SMB clients. |
 | **Production cluster** | A 6‑node bare‑metal Kubernetes cluster (kubeadm) that runs our own workloads and is the reference implementation for client work. |
-| **Application development** | Serverless full‑stack apps on AWS (SAM + React), an on‑prem IoT platform, and multi‑agent tooling. |
+| **Application development** | Serverless full‑stack apps on AWS (SAM + React), including the RC Race HQ SaaS, an on‑prem IoT platform, Raspberry Pi appliances, and multi‑agent tooling. |
 
 ---
 
@@ -71,6 +71,21 @@ together.
 
 ### Applications
 
+- **RC Race HQ (`rcracehq.com`)** — a multi‑club SaaS for RC racing clubs. **Live
+  in production.** Each club gets its own site on a custom domain with its own
+  branding, events and registration, news, media galleries, and a shared
+  track / hobby‑shop directory with zip‑radius search. Racers pay the club
+  directly through Stripe Connect or Square; the platform never holds club
+  money. Serverless AWS SAM backend (Lambda, DynamoDB, Cognito, S3/CloudFront)
+  with a React + TypeScript SPA, a public read‑only API, and a QuickBooks CSV
+  export. Dev and prod deploy through separate GitHub OIDC roles, and every IAM
+  permission is documented in the repo.
+- **RC Race HQ lap counter** — a Raspberry Pi race‑timing appliance: RTL‑SDR
+  transponder decoding, a containerized app built in CI and provisioned with
+  Ansible, an always‑on event Wi‑Fi with a captive portal and walk‑up kiosk
+  check‑in, and an offline outbox that syncs heats and results to RC Race HQ
+  over AWS IoT MQTT with per‑device isolation. Companion RF burst‑detector HAT
+  designed in KiCad.
 - **File‑sharing platform (`schuit.io`)** — an invite‑only web app for browsing
   and downloading shared files out of S3, with per‑mount access control and
   admin‑managed invites. **Live in production.** Serverless AWS SAM backend +
@@ -102,9 +117,16 @@ together.
 - **On‑prem IoT platform** — a self‑hostable device backend (`iot-onprem.sturgeon.tech`):
   EMQX for MQTT, MongoDB for state, `step-ca` for device certificates, and an API
   service, all running in the cluster.
-- **Agent runtime** — a portable agent that "runs anywhere, uses anything,"
-  deployed on the cluster as department‑shaped workers (dev, management,
-  marketing/sales, research) with persistent per‑agent state.
+- **AI Community (agent team)** — an orchestrator plus specialized workers
+  (Claude for development, Grok for marketing research) running in one
+  Kubernetes pod. GitHub issues are the task queue and a `ready` label is the
+  start button; every result is a PR a human merges. Agents post to
+  write‑only Discord watch channels, pause on provider usage limits and resume
+  automatically, and keep per‑agent memory in a git‑backed Obsidian vault.
+  Each agent gets its own scoped tokens, a repo allow‑list, no cluster
+  credentials, and egress‑only networking.
+- **RC remote‑drive POC** — analog FPV video captured on a Pi and streamed to the
+  browser over WebRTC (MediaMTX); RF control is in progress.
 
 ---
 
